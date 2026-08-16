@@ -6,28 +6,19 @@ const { monthlyAmount, requirement, sourceMismatch, round2 } = require('./driver
 const { periodsForFy, FY_MONTHS } = require('./fyCalendar');
 
 function driversForFy(db, fy) {
-  return db
-    .prepare(
-      `SELECT cost_driver.*, source.name AS source_name, source.system AS source_system,
-              source.reported_qty AS source_reported_qty
-       FROM cost_driver
-       JOIN source ON source.id = cost_driver.source_id
-       WHERE cost_driver.fy = ?
-       ORDER BY cost_driver.name`
-    )
-    .all(fy);
+  return db.prepare(`SELECT * FROM cost_driver WHERE fy = ? ORDER BY name`).all(fy);
 }
 
 function fyPosition(db, fy) {
   const funding = db.prepare(`SELECT * FROM fy_funding WHERE fy = ?`).get(fy);
   const allocations = db
-    .prepare(`SELECT aor.name AS aor_name, aor_fy_allocation.allocated_amount
+    .prepare(`SELECT aor.record_id AS aor_record_id, aor_fy_allocation.allocated_amount
               FROM aor_fy_allocation JOIN aor ON aor.id = aor_fy_allocation.aor_id
               WHERE aor_fy_allocation.fy = ?`)
     .all(fy);
   const drivers = driversForFy(db, fy);
   const totalRequirement = drivers.reduce((sum, d) => sum + requirement(d), 0);
-  const totalAllocated = allocations.reduce((sum, a) => sum + a.allocated_amount, 0);
+  const totalAllocated = allocations.reduce((sum, a) => sum + (a.allocated_amount || 0), 0);
   return {
     fy,
     requested_amount: funding ? funding.requested_amount : null,
@@ -41,11 +32,11 @@ function fyPosition(db, fy) {
 function recognisedActualsTotal(db, fy) {
   const row = db
     .prepare(
-      `SELECT COALESCE(SUM(amount), 0) AS total
+      `SELECT COALESCE(SUM(recognised_amount), 0) AS total
        FROM actual
-       WHERE status = 'Recognised' AND period LIKE ?`
+       WHERE status = 'Recognised' AND fy = ?`
     )
-    .get(`${fy}-%`);
+    .get(fy);
   return round2(row.total);
 }
 
@@ -61,8 +52,8 @@ function forecastMonth(db, fy) {
   const periods = periodsForFy(fy).map((period) => {
     const actualForPeriod = db
       .prepare(
-        `SELECT COALESCE(SUM(amount), 0) AS total FROM actual
-         WHERE status = 'Recognised' AND period = ?`
+        `SELECT COALESCE(SUM(recognised_amount), 0) AS total FROM actual
+         WHERE status = 'Recognised' AND reporting_month = ?`
       )
       .get(period).total;
     return {
@@ -85,26 +76,23 @@ function forecastMonth(db, fy) {
 }
 
 function variance(db, fy) {
-  const drivers = driversForFy(db, fy);
-  return drivers.map((d) => {
-    const { diffQty, amount } = sourceMismatch(d, {
-      reported_qty: d.source_reported_qty,
-    });
+  return driversForFy(db, fy).map((d) => {
+    const req = round2(requirement(d));
+    const diff = sourceMismatch(d);
     return {
-      driver: d.name,
-      source: d.source_name,
-      driver_qty: d.qty,
-      source_reported_qty: d.source_reported_qty,
-      diff_qty: diffQty,
-      rate: d.rate,
-      mismatch_amount: amount,
-      status: diffQty !== 0 ? 'DRIVER MISMATCH' : 'OK',
+      cost_stream: d.cost_stream,
+      cost_item: d.name,
+      source_plan: d.source_planned_cost,
+      driver_requirement: req,
+      mismatch_amount: diff,
+      status: diff !== 0 ? 'DRIVER MISMATCH' : 'OK',
     };
   });
 }
 
 function pivotCostStream(db, fy) {
   return driversForFy(db, fy).map((d) => ({
+    cost_stream: d.cost_stream,
     driver: d.name,
     monthly: round2(monthlyAmount(d)),
     requirement: round2(requirement(d)),
@@ -114,10 +102,10 @@ function pivotCostStream(db, fy) {
 function pivotAor(db, fy) {
   return db
     .prepare(
-      `SELECT aor.name AS aor_name, aor_fy_allocation.allocated_amount
+      `SELECT aor.record_id AS aor_record_id, aor.description, aor_fy_allocation.allocated_amount
        FROM aor_fy_allocation JOIN aor ON aor.id = aor_fy_allocation.aor_id
        WHERE aor_fy_allocation.fy = ?
-       ORDER BY aor.name`
+       ORDER BY aor.record_id`
     )
     .all(fy);
 }

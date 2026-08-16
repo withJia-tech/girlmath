@@ -103,7 +103,7 @@ function buildWorkbook(db) {
     '06_Licence_Checks',
     db.prepare(`SELECT * FROM licence_observation ORDER BY period, cost_driver_id`).all()
   );
-  addTable(workbook, '07_Actuals', db.prepare(`SELECT * FROM actual ORDER BY period, id`).all());
+  addTable(workbook, '07_Actuals', db.prepare(`SELECT * FROM actual ORDER BY id`).all());
 
   const forecastRows = FYS.flatMap((fy) => forecastMonth(db, fy).periods.map((p) => ({ fy, ...p })));
   addTable(workbook, '08_Forecast_Monthly', forecastRows);

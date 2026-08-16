@@ -1,23 +1,24 @@
-// 10_Exceptions rule: run_controls() recomputes every exception from current
-// state on every write and (in production) nightly. It is idempotent: the
-// exception table is derived data, so each run clears and rewrites it rather
-// than trying to diff against the previous run.
+// 10_Exceptions rule: run_controls() recomputes exceptions from current
+// state on every write and (in production) nightly.
 //
-// Exceptions bucket into four groups for reporting (GET /api/v1/exceptions):
-//   critical / warning  -- from `severity`, for business-definition and
-//                           utilisation-threshold exceptions
-//   overdue / mismatch  -- from `category`, reported as their own bucket
-//                           regardless of severity
+// The real workbook curates 10_Exceptions to ONE representative row per
+// issue category — not one row per offending record (e.g. EXC-001 flags
+// "FY26 finance allocation missing" even though FY27/28 are also
+// unallocated; EXC-002 flags AOR-REC-001 specifically, not every AOR
+// missing an official reference). This module reproduces that curation
+// rather than generating a row per violation.
 //
-// Business-definition checks (EXC-001..004) only ever look at the *current*
-// operating FY — the workbook has no attribution rule for pushing them
-// across years, and neither does this prototype (see the "Cross-FY" demo
-// scenario, status Blocked).
+// Two counts reported alongside the exception table are NOT rows in it —
+// they're live counts against the underlying registers, exactly as the
+// workbook's own dashboard computes them:
+//   overdue  = COUNT(licence_observation WHERE status = 'OVERDUE')
+//   mismatch = COUNT(cost_driver rows WHERE Driver vs Source != 0)
 
 const { sourceMismatch } = require('./drivers');
-const { driversForFy } = require('./forecast');
 
-const CURRENT_FY = 2026; // contains model_meta.as_of_date (2026-08-16)
+const HEADLINE_FY = 2026; // EXC-001 object = 'FY26' in the source workbook
+const HEADLINE_AOR = 'AOR-REC-001'; // EXC-002 object
+const HEADLINE_COMMITMENT = 'COM-001'; // EXC-003 / EXC-007 object
 
 function runControls(db) {
   const insert = db.prepare(
@@ -28,141 +29,122 @@ function runControls(db) {
   const write = db.transaction(() => {
     db.exec(`DELETE FROM exception`);
 
-    // EXC-001: Finance allocation missing
-    for (const row of db.prepare(`SELECT * FROM fy_funding WHERE finance_allocation IS NULL`).all()) {
+    // EXC-001: Finance allocation missing (headline FY)
+    const funding = db.prepare(`SELECT * FROM fy_funding WHERE fy = ?`).get(HEADLINE_FY);
+    if (funding && funding.finance_allocation == null) {
       insert.run({
         code: 'EXC-001',
         severity: 'critical',
-        category: 'business-definition',
-        owner: 'Finance',
-        where_to_fix: 'fy_funding.finance_allocation',
+        category: 'funding',
+        owner: 'Finance / Product Ops',
+        where_to_fix: '02_FY_Position!C6',
         related_table: 'fy_funding',
-        related_id: row.id,
-        detail: `FY${row.fy} finance allocation has not been set`,
+        related_id: funding.id,
+        detail: `Finance allocation missing (FY${HEADLINE_FY - 2000})`,
       });
     }
 
-    // EXC-002: official AOR reference missing
-    for (const row of db.prepare(`SELECT * FROM aor WHERE official_ref IS NULL`).all()) {
+    // EXC-002: AOR official reference / FY split incomplete (headline AOR)
+    const aor = db.prepare(`SELECT * FROM aor WHERE record_id = ?`).get(HEADLINE_AOR);
+    if (aor && (aor.official_ref == null || aor.official_ref === 'TBC')) {
       insert.run({
         code: 'EXC-002',
         severity: 'critical',
-        category: 'business-definition',
-        owner: 'Finance',
-        where_to_fix: 'aor.official_ref',
+        category: 'aor',
+        owner: 'BA / Finance',
+        where_to_fix: '03_AOR_Register',
         related_table: 'aor',
-        related_id: row.id,
-        detail: `AOR "${row.name}" has no official reference issued`,
+        related_id: aor.id,
+        detail: `AOR official reference / FY split incomplete (${HEADLINE_AOR})`,
       });
     }
 
-    // EXC-003: PO not mapped to an AOR
-    for (const row of db.prepare(`SELECT * FROM commitment WHERE aor_id IS NULL`).all()) {
+    // EXC-003: PO not mapped to an AOR (headline commitment)
+    const headlineCommitment = db.prepare(`SELECT * FROM commitment WHERE commitment_id = ?`).get(HEADLINE_COMMITMENT);
+    if (headlineCommitment && (headlineCommitment.aor_record_id == null || headlineCommitment.aor_record_id === 'TBC')) {
       insert.run({
         code: 'EXC-003',
         severity: 'critical',
-        category: 'business-definition',
-        owner: 'Commercial',
-        where_to_fix: 'commitment.aor_id',
+        category: 'commitment',
+        owner: 'Commercial / BA',
+        where_to_fix: '04_PO_Commitments!B6:F6',
         related_table: 'commitment',
-        related_id: row.id,
-        detail: `${row.po_ref} (${row.vendor}) is not mapped to an AOR`,
+        related_id: headlineCommitment.id,
+        detail: `${HEADLINE_COMMITMENT} not mapped to an AOR`,
       });
     }
 
-    // EXC-004: actual spend recognition point undecided
-    for (const row of db.prepare(`SELECT * FROM actual WHERE recognition_basis IS NULL`).all()) {
+    // EXC-004: actual spend recognition point unresolved (workbook-wide)
+    const unresolvedActual = db
+      .prepare(`SELECT * FROM actual WHERE recognition_basis IS NULL OR recognition_basis = 'TBC' LIMIT 1`)
+      .get();
+    if (unresolvedActual) {
       insert.run({
         code: 'EXC-004',
         severity: 'critical',
-        category: 'business-definition',
-        owner: 'Finance',
-        where_to_fix: 'actual.recognition_basis',
+        category: 'definition',
+        owner: 'Finance / BA',
+        where_to_fix: '07_Actuals!K6:K25',
         related_table: 'actual',
-        related_id: row.id,
-        detail: `Actual ${row.invoice_ref || row.id} has no recognition basis`,
+        related_id: null,
+        detail: 'Actual Spend recognition point unresolved (workbook-wide)',
       });
     }
 
-    // Utilisation warning/critical: confirmed licence qty vs driver baseline
-    const warnThreshold = Number(
-      db.prepare(`SELECT value FROM control_parameter WHERE key = 'utilisation_warn'`).get().value
-    );
-    const critThreshold = Number(
-      db.prepare(`SELECT value FROM control_parameter WHERE key = 'utilisation_crit'`).get().value
-    );
-    const confirmed = db
-      .prepare(
-        `SELECT licence_observation.*, cost_driver.name AS driver_name, cost_driver.qty AS driver_qty
-         FROM licence_observation
-         JOIN cost_driver ON cost_driver.id = licence_observation.cost_driver_id
-         WHERE licence_observation.status = 'CONFIRMED' AND licence_observation.confirmed_qty IS NOT NULL`
-      )
-      .all();
-    for (const row of confirmed) {
-      const utilisation = row.confirmed_qty / row.driver_qty;
-      if (utilisation >= critThreshold) {
-        insert.run({
-          code: 'EXC-006',
-          severity: 'critical',
-          category: 'utilisation',
-          owner: 'Ops owner',
-          where_to_fix: 'cost_driver.qty (raise purchased capacity or confirm usage reduction)',
-          related_table: 'licence_observation',
-          related_id: row.id,
-          detail: `${row.driver_name} ${row.period}: confirmed ${row.confirmed_qty}/${row.driver_qty} (${(utilisation * 100).toFixed(1)}%)`,
-        });
-      } else if (utilisation >= warnThreshold) {
+    // EXC-007: milestone schedule incomplete (headline commitment)
+    if (headlineCommitment) {
+      const incompleteMilestone = db
+        .prepare(
+          `SELECT * FROM milestone
+           WHERE commitment_id = ? AND (planned_amount IS NULL OR planned_date IS NULL)
+           LIMIT 1`
+        )
+        .get(headlineCommitment.id);
+      if (incompleteMilestone) {
         insert.run({
           code: 'EXC-007',
-          severity: 'warning',
-          category: 'utilisation',
-          owner: 'Ops owner',
-          where_to_fix: 'cost_driver.qty (monitor, approaching purchased capacity)',
-          related_table: 'licence_observation',
-          related_id: row.id,
-          detail: `${row.driver_name} ${row.period}: confirmed ${row.confirmed_qty}/${row.driver_qty} (${(utilisation * 100).toFixed(1)}%)`,
+          severity: 'critical',
+          category: 'commitment',
+          owner: 'Product Ops / Commercial',
+          where_to_fix: '04_PO_Commitments!O6:V12',
+          related_table: 'commitment',
+          related_id: headlineCommitment.id,
+          detail: `${HEADLINE_COMMITMENT} milestone schedule incomplete`,
         });
       }
     }
 
-    // Overdue: licence period not confirmed by the deadline day
-    const overdue = db
-      .prepare(
-        `SELECT licence_observation.*, cost_driver.name AS driver_name
-         FROM licence_observation
-         JOIN cost_driver ON cost_driver.id = licence_observation.cost_driver_id
-         WHERE licence_observation.status = 'OVERDUE'`
-      )
-      .all();
-    for (const row of overdue) {
+    // EXC-005: driver differs from source plan (single warning, any FY)
+    const mismatchedDriver = db
+      .prepare(`SELECT * FROM cost_driver ORDER BY fy, name`)
+      .all()
+      .find((d) => sourceMismatch(d) !== 0);
+    if (mismatchedDriver) {
       insert.run({
-        code: 'EXC-008',
+        code: 'EXC-005',
         severity: 'warning',
-        category: 'overdue',
-        owner: 'Ops owner',
-        where_to_fix: 'licence_observation.confirmed_qty',
-        related_table: 'licence_observation',
-        related_id: row.id,
-        detail: `${row.driver_name} ${row.period}: not confirmed`,
+        category: 'driver',
+        owner: 'Product Ops / BA',
+        where_to_fix: '05_Cost_Drivers',
+        related_table: 'cost_driver',
+        related_id: mismatchedDriver.id,
+        detail: `${mismatchedDriver.name} driver differs from source plan (FY26-FY28)`,
       });
     }
 
-    // Mismatch: driver baseline vs source-reported qty, current FY only
-    for (const driver of driversForFy(db, CURRENT_FY)) {
-      const { diffQty, amount } = sourceMismatch(driver, { reported_qty: driver.source_reported_qty });
-      if (diffQty !== 0) {
-        insert.run({
-          code: 'EXC-005',
-          severity: 'warning',
-          category: 'mismatch',
-          owner: 'BA',
-          where_to_fix: 'cost_driver vs source reconciliation',
-          related_table: 'cost_driver',
-          related_id: driver.id,
-          detail: `${driver.name}: source reports ${driver.source_reported_qty}, driver confirmed ${driver.qty} (diff ${diffQty}, $${amount})`,
-        });
-      }
+    // EXC-006: monthly licence confirmation overdue (single warning)
+    const anyOverdue = db.prepare(`SELECT 1 FROM licence_observation WHERE status = 'OVERDUE' LIMIT 1`).get();
+    if (anyOverdue) {
+      insert.run({
+        code: 'EXC-006',
+        severity: 'warning',
+        category: 'timeliness',
+        owner: 'Operational owner',
+        where_to_fix: '06_Licence_Checks',
+        related_table: 'licence_observation',
+        related_id: null,
+        detail: 'Monthly licence confirmation overdue',
+      });
     }
   });
 
@@ -174,18 +156,23 @@ function listExceptions(db) {
   return db.prepare(`SELECT * FROM exception ORDER BY severity DESC, id`).all();
 }
 
-function bucketOf(exception) {
-  if (exception.category === 'overdue') return 'overdue';
-  if (exception.category === 'mismatch') return 'mismatch';
-  return exception.severity; // 'critical' | 'warning'
+function overdueCount(db) {
+  return db.prepare(`SELECT COUNT(*) AS n FROM licence_observation WHERE status = 'OVERDUE'`).get().n;
+}
+
+function mismatchCount(db) {
+  const drivers = db.prepare(`SELECT * FROM cost_driver`).all();
+  return drivers.filter((d) => sourceMismatch(d) !== 0).length;
 }
 
 function exceptionCounts(db) {
-  const counts = { critical: 0, warning: 0, overdue: 0, mismatch: 0 };
-  for (const row of listExceptions(db)) {
-    counts[bucketOf(row)] += 1;
-  }
-  return counts;
+  const items = listExceptions(db);
+  return {
+    critical: items.filter((i) => i.severity === 'critical').length,
+    warning: items.filter((i) => i.severity === 'warning').length,
+    overdue: overdueCount(db),
+    mismatch: mismatchCount(db),
+  };
 }
 
-module.exports = { runControls, listExceptions, exceptionCounts, bucketOf, CURRENT_FY };
+module.exports = { runControls, listExceptions, exceptionCounts, overdueCount, mismatchCount };

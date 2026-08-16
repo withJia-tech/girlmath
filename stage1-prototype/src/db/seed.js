@@ -1,151 +1,250 @@
-// Seed data engineered so the API's computed outputs reproduce the figures
-// already cited by the Stage 0 test harness (see docs/architecture-note.html
-// section 6): FY26 forecast 130200, FY27/28 forecast 195300 each, monthly
-// run-rate 16275, Jira & Confluence driver mismatch +120, and exceptions
-// 5 critical / 2 warning / 5 overdue / 3 mismatches.
-//
-// Monthly driver run-rate (16275 = 9450 + 2475 + 2250 + 2100):
-//   Azure Cloud Infrastructure   qty=1   rate=9450  -> 9450/mo
-//   GitLab Ultimate              qty=45  rate=55    -> 2475/mo
-//   Jira                         qty=150 rate=15    -> 2250/mo
-//   Confluence                   qty=175 rate=12    -> 2100/mo
-// FY26 is an 8-month partial year (program starts May 2026): 16275*8 = 130200
-// FY27/FY28 are full 12-month years: 16275*12 = 195300 each
+// Seed data ported directly from the real Stage 0 test harness
+// (stage0-test-harness/index.html, <script id="seed">) — this is the
+// ground-truth workbook snapshot, not fabricated data. Every figure here
+// should trace back to a cell in that embedded JSON.
 
-const { FY_MONTHS } = require('../rules/fyCalendar');
+const { FY_MONTHS, periodsForFy } = require('../rules/fyCalendar');
+
+const FYS = [2026, 2027, 2028];
+
+// name -> { costStream, qty, rate, sourcePlannedCost: {fy: amount} }
+// source_planned_cost differs from qty*rate*months only for "Jira & Confluence"
+// (the DRV-007/008/009 rows) — that's the one driver-vs-source mismatch.
+const DRIVERS = [
+  {
+    name: 'Atlassian Dedicated Site',
+    costStream: 'Subscriptions / Central Tools',
+    qty: 1,
+    rate: 800,
+    sourcePlannedCost: { 2026: 6400, 2027: 9600, 2028: 9600 },
+    sourceRefPrefix: 'SRC-ATLA',
+  },
+  {
+    name: 'GitLab Ultimate',
+    costStream: 'Subscriptions / Central Tools',
+    qty: 20,
+    rate: 125,
+    sourcePlannedCost: { 2026: 20000, 2027: 30000, 2028: 30000 },
+    sourceRefPrefix: 'SRC-GITL',
+  },
+  {
+    name: 'Jira & Confluence',
+    costStream: 'Subscriptions / Central Tools',
+    qty: 20,
+    rate: 30,
+    sourcePlannedCost: { 2026: 4680, 2027: 7020, 2028: 7020 },
+    sourceRefPrefix: 'SRC-JIRA',
+  },
+  {
+    name: 'Jira Service Management',
+    costStream: 'Subscriptions / Central Tools',
+    qty: 275,
+    rate: 45,
+    sourcePlannedCost: { 2026: 99000, 2027: 148500, 2028: 148500 },
+    sourceRefPrefix: 'SRC-JSM',
+  },
+  {
+    name: 'SonarQube Community',
+    costStream: 'Subscriptions / Central Tools',
+    qty: 1,
+    rate: 0,
+    sourcePlannedCost: { 2026: 0, 2027: 0, 2028: 0 },
+    sourceRefPrefix: 'SRC-SONA',
+  },
+];
 
 function seed(db) {
   const insert = db.transaction(() => {
     db.prepare(
       `INSERT INTO model_meta (id, version, as_of_date, status, currency, fy_basis)
        VALUES (1, ?, ?, ?, ?, ?)`
-    ).run('0.1.0-stage1', '2026-08-16', 'REVIEW', 'USD', 'Calendar year (FY26 partial: May-Dec 2026)');
+    ).run('0.1 Draft', '2026-08-15', 'REVIEW', 'SGD', '1 April to 31 March');
 
     const fundingStmt = db.prepare(
-      `INSERT INTO fy_funding (fy, requested_amount, finance_allocation) VALUES (?, ?, ?)`
+      `INSERT INTO fy_funding (fy, requested_amount, finance_allocation) VALUES (?, NULL, NULL)`
     );
-    fundingStmt.run(2026, 130200, null); // EXC-001: Finance has not yet allocated FY26
-    fundingStmt.run(2027, 195300, 195300);
-    fundingStmt.run(2028, 195300, 195300);
+    for (const fy of FYS) fundingStmt.run(fy);
 
     const aorStmt = db.prepare(
-      `INSERT INTO aor (name, official_ref, description) VALUES (?, ?, ?)`
+      `INSERT INTO aor (record_id, official_ref, description, base_amount, contingency, valid_from, valid_to)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     );
-    const aorTooling = aorStmt.run(
-      'Platform Engineering Tooling',
-      null, // EXC-002: official AOR reference not yet issued
-      'GitLab, Jira and Confluence seat licensing for the engineering platform'
+    const aor1 = aorStmt.run(
+      'AOR-REC-001',
+      'TBC',
+      'HSS Central Kitchen — Jira Svc Mgmt + JSM',
+      10800,
+      10200,
+      '2026-02-01',
+      '2027-02-28'
     ).lastInsertRowid;
-    const aorCloud = aorStmt.run(
-      'Cloud Infrastructure & Hosting',
-      'GSIB-AOR-2026-014',
-      'Azure subscription hosting production and non-production workloads'
-    ).lastInsertRowid;
+    const aor2 = aorStmt.run('AOR-REC-002', 'TBC', 'Dedicated site maintenance', 9600, 960, null, null)
+      .lastInsertRowid;
+    const aor3 = aorStmt.run('AOR-REC-003', 'TBC', 'Input additional approved AORs', null, null, null, null)
+      .lastInsertRowid;
 
     const allocStmt = db.prepare(
-      `INSERT INTO aor_fy_allocation (aor_id, fy, allocated_amount) VALUES (?, ?, ?)`
+      `INSERT INTO aor_fy_allocation (aor_id, fy, allocated_amount) VALUES (?, ?, NULL)`
     );
-    const toolingMonthly = 2475 + 2250 + 2100; // 6825
-    const cloudMonthly = 9450;
-    for (const [fy, months] of Object.entries(FY_MONTHS)) {
-      allocStmt.run(aorTooling, Number(fy), toolingMonthly * months);
-      allocStmt.run(aorCloud, Number(fy), cloudMonthly * months);
-    }
+    allocStmt.run(aor1, 2026);
+    allocStmt.run(aor1, 2027);
+    allocStmt.run(aor2, 2026);
+    allocStmt.run(aor2, 2027);
+    allocStmt.run(aor2, 2028);
+    allocStmt.run(aor3, 2026);
 
     const sourceStmt = db.prepare(
-      `INSERT INTO source (name, system, reported_qty) VALUES (?, ?, ?)`
+      `INSERT INTO source (source_ref, item, source_role, source_name, section_ref, value_use, owner, as_of, status, notes, location)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
-    const srcAzure = sourceStmt.run('Azure subscription meter', 'Azure', 1).lastInsertRowid;
-    const srcGitlab = sourceStmt.run('GitLab seat portal', 'GitLab', 47).lastInsertRowid; // driver qty 45 -> +2 seats = $110 mismatch
-    const srcJira = sourceStmt.run('Atlassian licence portal (Jira)', 'Jira', 154).lastInsertRowid; // driver qty 150 -> +4 seats = $60 mismatch
-    const srcConfluence = sourceStmt.run('Atlassian licence portal (Confluence)', 'Confluence', 180).lastInsertRowid; // driver qty 175 -> +5 seats = $60 mismatch
-
-    const driverStmt = db.prepare(
-      `INSERT INTO cost_driver (name, source_id, qty, rate, months, fy) VALUES (?, ?, ?, ?, ?, ?)`
+    sourceStmt.run(
+      'SRC-REF-001', 'Business rules', 'Authority', 'HSS Central financial-control Markdown reference pack',
+      '03/04/06/11', 'Business definitions and workbook structure', 'BA / Product Ops', '2026-08-14', 'Current',
+      'Superseded where later project decisions are more specific', 'Library: /Hss/cost-monitoring-reference(1).zip'
     );
-    const driverIds = { azure: {}, gitlab: {}, jira: {}, confluence: {} };
-    for (const [fy, months] of Object.entries(FY_MONTHS)) {
-      driverIds.azure[fy] = driverStmt.run('Azure Cloud Infrastructure', srcAzure, 1, 9450, months, Number(fy)).lastInsertRowid;
-      driverIds.gitlab[fy] = driverStmt.run('GitLab Ultimate', srcGitlab, 45, 55, months, Number(fy)).lastInsertRowid;
-      driverIds.jira[fy] = driverStmt.run('Jira', srcJira, 150, 15, months, Number(fy)).lastInsertRowid;
-      driverIds.confluence[fy] = driverStmt.run('Confluence', srcConfluence, 175, 12, months, Number(fy)).lastInsertRowid;
-    }
-
-    // Licence checks — only the FY26 driver rows have observations, since the
-    // as-of date (2026-08-16) sits inside FY26. Engineered to produce exactly
-    // 2 warning, 1 critical (utilisation) and 5 overdue exceptions.
-    const licStmt = db.prepare(
-      `INSERT INTO licence_observation
-         (cost_driver_id, period, confirmed_qty, evidence_ref, confirmed_by, confirmed_at, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    sourceStmt.run(
+      'SRC-SUB-001', 'Subscription plan', 'Planned requirement', 'HSS Central budget CSV / table supplied by user',
+      'Forward cost plan', 'FY26-FY28 amounts and quantity/rate drivers', 'Product Ops', '2026-08-13', 'Current',
+      'Original file not present in workspace; figures carried from user-provided table', 'User-provided project source'
     );
-    licStmt.run(driverIds.gitlab[2026], '2026-06', 40, 'GL-EVID-06', 'ops.owner@example.com', '2026-06-05T09:00:00Z', 'CONFIRMED'); // 40/45=0.89 -> warning
-    licStmt.run(driverIds.gitlab[2026], '2026-07', 46, 'GL-EVID-07', 'ops.owner@example.com', '2026-07-04T09:00:00Z', 'CONFIRMED'); // 46/45=1.02 -> critical
-    licStmt.run(driverIds.gitlab[2026], '2026-08', null, null, null, null, 'OVERDUE');
-
-    licStmt.run(driverIds.jira[2026], '2026-06', 110, 'JR-EVID-06', 'ops.owner@example.com', '2026-06-06T09:00:00Z', 'CONFIRMED'); // 110/150=0.73 -> ok
-    licStmt.run(driverIds.jira[2026], '2026-07', null, null, null, null, 'OVERDUE');
-    licStmt.run(driverIds.jira[2026], '2026-08', null, null, null, null, 'OVERDUE');
-
-    licStmt.run(driverIds.confluence[2026], '2026-06', 150, 'CF-EVID-06', 'ops.owner@example.com', '2026-06-07T09:00:00Z', 'CONFIRMED'); // 150/175=0.86 -> warning
-    licStmt.run(driverIds.confluence[2026], '2026-07', null, null, null, null, 'OVERDUE');
-    licStmt.run(driverIds.confluence[2026], '2026-08', null, null, null, null, 'OVERDUE');
+    sourceStmt.run(
+      'SRC-AOR-001', 'AOR ask', 'Funding authorisation', 'HSS Central budget AOR section', 'HSS Central Kitchen',
+      'Base 10,800; contingency 10,200; total 21,000', 'Finance / BA', '2026-08-13', 'Needs confirmation',
+      'Official AOR reference and FY split TBC', 'User-provided project source'
+    );
+    sourceStmt.run(
+      'SRC-AOR-002', 'AOR ask', 'Funding authorisation', 'HSS Central budget AOR section', 'Dedicated site maintenance',
+      'Base 9,600; contingency 960; total 10,560', 'Finance / BA', '2026-08-13', 'Needs confirmation',
+      'Validity and FY split TBC', 'User-provided project source'
+    );
+    sourceStmt.run(
+      'SRC-PO-001', 'Azure PO', 'Commercial commitment', 'Azure PO description supplied by user', 'ESWO for HSS POC',
+      'PO ceiling SGD 3,000,000; supplier Microsoft Regional Sales; partially invoiced', 'Commercial / Product Ops',
+      '2026-08-13', 'Needs confirmation', 'Official PO reference and milestone schedule TBC', 'User-provided project source'
+    );
+    sourceStmt.run(
+      'SRC-OPS-001', 'Developer portal', 'Operational observation', 'Monthly portal quantity confirmation',
+      '8th-of-month control', 'Confirmed licence quantity and evidence reference', 'Operational owner', '2026-08-14',
+      'Recurring', 'No live observation entered', 'Manual entry / transient upload'
+    );
+    sourceStmt.run(
+      'SRC-ACT-001', 'Invoice / DO / GR', 'Actual evidence', 'Actual expenditure evidence', 'Recognition rule TBC',
+      'Only recognised records flow to Actual Spend', 'Finance / Product Ops', '2026-08-14', 'Open definition',
+      'Canonical recognition point must be approved', 'Invoice / DO / Finance source'
+    );
 
     const commitStmt = db.prepare(
-      `INSERT INTO commitment (po_ref, aor_id, ceiling_amount, vendor) VALUES (?, ?, ?, ?)`
+      `INSERT INTO commitment (commitment_id, po_ref, fy, supplier, cost_stream, aor_record_id, description, start_date, end_date, ceiling_amount, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
-    const poCloud = commitStmt.run('PO-2026-001', aorCloud, 120000, 'Microsoft Azure').lastInsertRowid;
-    const poTooling = commitStmt.run('PO-2026-002', aorTooling, 90000, 'Atlassian (Jira & Confluence)').lastInsertRowid;
-    const poUnmapped = commitStmt.run('PO-2026-003', null, 40000, 'Azure Marketplace - GitLab Ultimate reseller').lastInsertRowid; // EXC-003: unmapped PO
+    const com1 = commitStmt.run(
+      'COM-001', 'TBC', 2026, 'Microsoft Regional Sales', 'Central Infrastructure / Cloud Spend', 'TBC',
+      'ESWO for HSS POC — Azure', null, null, 3000000, 'Partially Invoiced'
+    ).lastInsertRowid;
+    const com2 = commitStmt.run(
+      'COM-002', 'TBC', 2026, 'TBC', 'Professional Services', 'TBC',
+      'Input approved PO / contract', null, null, null, 'Draft'
+    ).lastInsertRowid;
+    const com3 = commitStmt.run(
+      'COM-003', 'TBC', 2027, 'TBC', 'Subscriptions / Central Tools', 'TBC',
+      'Input approved subscription contract', null, null, null, 'Draft'
+    ).lastInsertRowid;
 
     const msStmt = db.prepare(
-      `INSERT INTO milestone (commitment_id, planned_amount, planned_date, status) VALUES (?, ?, ?, ?)`
+      `INSERT INTO milestone (milestone_id, commitment_id, planned_date, planned_amount, recognised_actual, status, fy, source_evidence)
+       VALUES (?, ?, NULL, NULL, NULL, 'Pending', ?, 'Input milestone evidence')`
     );
-    msStmt.run(poCloud, 60000, '2026-06-30', 'Delivered');
-    msStmt.run(poCloud, 60000, '2027-06-30', 'Planned');
-    msStmt.run(poTooling, 45000, '2026-06-30', 'Delivered');
-    msStmt.run(poTooling, 45000, '2027-06-30', 'Planned');
-    msStmt.run(poUnmapped, 20000, '2026-06-30', 'Delivered');
-    msStmt.run(poUnmapped, 20000, '2027-06-30', 'Planned');
+    msStmt.run('MS-001', com1, 2026);
+    msStmt.run('MS-002', com1, 2026);
+    msStmt.run('MS-003', com1, 2027);
+    msStmt.run('MS-004', com2, 2026);
+    msStmt.run('MS-005', com3, 2027);
+    msStmt.run('MS-006', com3, 2028);
+
+    const driverStmt = db.prepare(
+      `INSERT INTO cost_driver (driver_id, fy, cost_area, cost_stream, name, driver_type, qty, rate, months, source_planned_cost, aor_record_id, po_ref, source_ref, status)
+       VALUES (?, ?, 'HSS Central', ?, ?, 'Licence quantity', ?, ?, ?, ?, 'TBC', 'TBC', ?, 'Source-backed plan')`
+    );
+    const driverIdsByNameFy = {}; // name -> {fy: id}
+    let driverSeq = 1;
+    for (const d of DRIVERS) {
+      driverIdsByNameFy[d.name] = {};
+      for (const fy of FYS) {
+        const months = FY_MONTHS[fy];
+        const driverCode = `DRV-${String(driverSeq).padStart(3, '0')}`;
+        const sourceRef = `${d.sourceRefPrefix}-FY${fy - 2000}`;
+        const result = driverStmt.run(
+          driverCode, fy, d.costStream, d.name, d.qty, d.rate, months, d.sourcePlannedCost[fy], sourceRef
+        );
+        driverIdsByNameFy[d.name][fy] = result.lastInsertRowid;
+        driverSeq += 1;
+      }
+    }
+
+    const licStmt = db.prepare(
+      `INSERT INTO licence_observation (observation_id, cost_driver_id, fy, period, planned_qty, confirmed_qty, due_date, confirmed_date, confirmed_by, source_reference, status)
+       VALUES (?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?)`
+    );
+    let obsSeq = 1;
+    for (const d of DRIVERS) {
+      const allPeriods = FYS.flatMap((fy) => periodsForFy(fy).map((period) => ({ fy, period })));
+      allPeriods.forEach(({ fy, period }, idx) => {
+        const observationId = `OBS-${String(obsSeq).padStart(4, '0')}`;
+        const dueDate = `${period}-08`;
+        // The first monthly check (Aug 2026) is already past its due date as
+        // of the 2026-08-15 as-of date; every later one is simply not due yet.
+        const status = idx === 0 ? 'OVERDUE' : 'DUE';
+        licStmt.run(observationId, driverIdsByNameFy[d.name][fy], fy, period, d.qty, dueDate, status);
+        obsSeq += 1;
+      });
+    }
 
     const actualStmt = db.prepare(
-      `INSERT INTO actual (aor_id, source_id, amount, period, recognition_basis, status, invoice_ref)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO actual (actual_id, transaction_date, fy, reporting_month, cost_item, aor_record_id, commitment_id, invoice_ref, do_ref, gr_status, recognition_basis, gross_amount, recognised_amount, source_ref, owner, status, notes)
+       VALUES (?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'Pending', 'TBC', NULL, 0, NULL, NULL, 'Draft', ?)`
     );
-    actualStmt.run(aorCloud, srcAzure, 9450, '2026-06', 'Delivery', 'Recognised', 'INV-AZR-2026-06');
-    actualStmt.run(aorCloud, srcAzure, 9450, '2026-07', 'Delivery', 'Recognised', 'INV-AZR-2026-07');
-    actualStmt.run(aorTooling, srcGitlab, 2475, '2026-06', 'Delivery', 'Recognised', 'INV-GL-2026-06');
-    actualStmt.run(aorTooling, srcJira, 2250, '2026-06', null, 'Pending', 'INV-JIRA-2026-06'); // EXC-004: recognition point undecided
+    for (let i = 1; i <= 20; i++) {
+      const actualId = `ACT-${String(i).padStart(3, '0')}`;
+      const notes =
+        i === 1 ? 'Enter recognised actuals with evidence; do not treat PO ceiling as spend.' : null;
+      actualStmt.run(actualId, notes);
+    }
 
-    const paramStmt = db.prepare(
-      `INSERT INTO control_parameter (key, value) VALUES (?, ?)`
-    );
+    const paramStmt = db.prepare(`INSERT INTO control_parameter (key, value) VALUES (?, ?)`);
     paramStmt.run('licence_confirm_deadline_day', '8');
     paramStmt.run('utilisation_warn', '0.8');
-    paramStmt.run('utilisation_crit', '1.0');
+    paramStmt.run('utilisation_crit', '1');
 
     const scenarioStmt = db.prepare(
-      `INSERT INTO demo_scenario (name, description, status) VALUES (?, ?, ?)`
+      `INSERT INTO demo_scenario (name, input, expected_rule, expected_result, live, owner, status, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     );
     scenarioStmt.run(
-      'Duplicate',
-      'Posting an actual with a (source_id, invoice_ref) pair that already exists is rejected by the database unique constraint; the API returns 409.',
-      'Passing'
+      'Licence drift', 'JSM planned 275; confirmed 300', 'Variance = +25; roll revised quantity forward',
+      'Forecast increases by 25 x rate x remaining months', 'No', 'BA / Tester', 'Ready',
+      'Demo scenario from project deck'
     );
     scenarioStmt.run(
-      'Correction',
-      'A prior actual is corrected by posting a reversal row referencing reversal_of_id; the pair nets to zero in forecast and variance views.',
-      'Passing'
+      'Partial invoicing', 'Azure PO ceiling 3m; partial actual', 'Actual must not equal PO ceiling',
+      'Remaining ceiling = PO value - recognised actual', 'No', 'BA / Tester', 'Ready',
+      'Requires milestone amounts for numeric test'
     );
     scenarioStmt.run(
-      'Licence drift',
-      'When a licence period rolls to OVERDUE, the monthly forecast keeps the last confirmed quantity rather than dropping to zero, and an overdue exception is raised.',
-      'Passing'
+      'Contingency', 'Base 10,800 + contingency 10,200', 'Preserve separate components', 'AOR total = 21,000',
+      'No', 'BA / Tester', 'Ready', 'Source-backed example'
     );
     scenarioStmt.run(
-      'Cross-FY',
-      'Allocating a single commitment across two financial years has no attribution rule from Finance yet.',
-      'Blocked'
+      'Duplicate', 'Same invoice/source ID submitted twice', 'Prevent double counting',
+      'Second record rejected or reviewed', 'No', 'BA / Tester', 'Designed', 'Implementation control'
+    );
+    scenarioStmt.run(
+      'Correction', 'Recognised actual corrected later', 'Preserve original and reversal',
+      'Net actual equals corrected amount', 'No', 'BA / Tester', 'Designed',
+      'Append-only correction principle'
+    );
+    scenarioStmt.run(
+      'Cross-FY', 'AOR or milestone spans FY boundary', 'Allocate by approved FY rule',
+      'Each FY reports only its approved share', 'No', 'Finance / BA', 'Blocked', 'FY attribution rule required'
     );
   });
 

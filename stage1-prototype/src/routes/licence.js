@@ -8,10 +8,10 @@ module.exports = function licenceRoutes(db) {
     const fy = req.query.fy ? Number(req.query.fy) : null;
     const rows = db
       .prepare(
-        `SELECT licence_observation.*, cost_driver.name AS driver_name, cost_driver.fy AS driver_fy
+        `SELECT licence_observation.*, cost_driver.name AS driver_name
          FROM licence_observation
          JOIN cost_driver ON cost_driver.id = licence_observation.cost_driver_id
-         ${fy ? 'WHERE cost_driver.fy = ?' : ''}
+         ${fy ? 'WHERE licence_observation.fy = ?' : ''}
          ORDER BY licence_observation.period, cost_driver.name`
       )
       .all(...(fy ? [fy] : []));
@@ -21,15 +21,15 @@ module.exports = function licenceRoutes(db) {
   router.patch('/:id/confirm', (req, res) => {
     const row = db.prepare(`SELECT * FROM licence_observation WHERE id = ?`).get(req.params.id);
     if (!row) return res.status(404).json({ error: 'licence observation not found' });
-    const { confirmed_qty, evidence_ref, confirmed_by } = req.body || {};
-    if (confirmed_qty == null || !evidence_ref || !confirmed_by) {
-      return res.status(400).json({ error: 'confirmed_qty, evidence_ref and confirmed_by are required' });
+    const { confirmed_qty, source_reference, confirmed_by } = req.body || {};
+    if (confirmed_qty == null || !source_reference || !confirmed_by) {
+      return res.status(400).json({ error: 'confirmed_qty, source_reference and confirmed_by are required' });
     }
     db.prepare(
       `UPDATE licence_observation
-       SET confirmed_qty = ?, evidence_ref = ?, confirmed_by = ?, confirmed_at = datetime('now'), status = 'CONFIRMED'
+       SET confirmed_qty = ?, source_reference = ?, confirmed_by = ?, confirmed_date = date('now'), status = 'CONFIRMED'
        WHERE id = ?`
-    ).run(confirmed_qty, evidence_ref, confirmed_by, row.id);
+    ).run(confirmed_qty, source_reference, confirmed_by, row.id);
     runControls(db);
     res.json(db.prepare(`SELECT * FROM licence_observation WHERE id = ?`).get(row.id));
   });
