@@ -1,0 +1,17 @@
+{
+  "name": "hss-financial-control-stage1",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Stage 1 prototype (Express + SQLite) for HSS Central Financial Control — proves the API contract ahead of the Stage 2 FastAPI/PostgreSQL build.",
+  "type": "commonjs",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "exceljs": "^4.4.0",
+    "express": "^4.21.0"
+  }
+}

@@ -1,0 +1,21 @@
+// Single source of truth for the FY calendar used across seed data, rules
+// and routes. FY26 is a partial year (the program starts May 2026); FY27
+// and FY28 are full calendar years.
+
+const FY_MONTHS = { 2026: 8, 2027: 12, 2028: 12 };
+const FY_START = { 2026: '2026-05', 2027: '2027-01', 2028: '2028-01' };
+
+function periodsForFy(fy) {
+  const months = FY_MONTHS[fy];
+  const [startYear, startMonth] = FY_START[fy].split('-').map(Number);
+  const periods = [];
+  for (let i = 0; i < months; i++) {
+    const totalMonth = startMonth - 1 + i;
+    const year = startYear + Math.floor(totalMonth / 12);
+    const month = (totalMonth % 12) + 1;
+    periods.push(`${year}-${String(month).padStart(2, '0')}`);
+  }
+  return periods;
+}
+
+module.exports = { FY_MONTHS, FY_START, periodsForFy };

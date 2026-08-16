@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HSS Central Financial Control — production architecture</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--paper:#F5F7FA;--panel:#fff;--ink:#14213D;--ink2:#3B4A6B;--rule:#D5DBE6;--blue:#1F4FBF;--yellow:#FFF3B0;--green:#1E7B4A;--amber:#B7791F;--red:#B42318;
+ --br:#EAF0FF;--api:#EAF6EE;--db:#FFF6DC;--mono:'IBM Plex Mono',ui-monospace,monospace;--sans:'IBM Plex Sans',system-ui,sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 var(--sans)}
+.wrap{max-width:1080px;margin:0 auto;padding:36px 26px 80px}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink2)}
+h1{font-size:34px;line-height:1.1;letter-spacing:-.02em;margin:6px 0 10px}
+.lede{font-size:17px;color:var(--ink2);max-width:74ch;margin:0 0 26px}
+h2{font-size:21px;margin:40px 0 8px;letter-spacing:-.01em;padding-top:18px;border-top:2px solid var(--ink)}
+h3{font-size:15px;margin:22px 0 6px}
+p{max-width:78ch}
+.tiers{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;gap:10px;align-items:stretch;margin:18px 0}
+.tier{border:1.5px solid var(--ink);border-radius:8px;padding:14px 16px;background:var(--panel)}
+.tier.br{background:var(--br)}.tier.api{background:var(--api)}.tier.db{background:var(--db)}
+.tier .t{font-weight:700;font-size:16px}.tier .s{font-family:var(--mono);font-size:12px;color:var(--ink2);margin-bottom:8px}
+.tier ul{margin:0;padding-left:16px;font-size:13.5px}.tier li{margin:3px 0}
+.arrow{align-self:center;font-family:var(--mono);color:var(--ink2);font-size:12px;text-align:center;line-height:1.3}
+.ext{font-family:var(--mono);font-size:12px;background:#fff;border:1px solid var(--rule);padding:0 5px;border-radius:3px;white-space:nowrap}
+.out{margin-top:10px;padding-top:8px;border-top:1px dashed var(--ink);font-size:13px}.out b{font-family:var(--mono);font-size:12px;letter-spacing:.06em}
+table{border-collapse:collapse;width:100%;font-size:13.5px;background:var(--panel);border:1px solid var(--rule)}
+th{text-align:left;background:#EEF1F5;padding:8px 10px;border-bottom:1.5px solid var(--ink);font-size:12.5px}
+td{padding:7px 10px;border-bottom:1px solid var(--rule);vertical-align:top}
+td.m,th.m{font-family:var(--mono);font-size:12.5px;white-space:nowrap}
+.tag{display:inline-block;font-family:var(--mono);font-size:11px;padding:1px 6px;border-radius:3px;margin-right:2px}
+.tag.tbl{background:var(--db)}.tag.view{background:#FFE9B8}.tag.rule{background:var(--api)}.tag.page{background:var(--br)}.tag.job{background:#F0E4FF}.tag.test{background:#E9E9E9}
+pre{background:#0F1B33;color:#E6EDF7;padding:14px 16px;border-radius:6px;font:12.5px/1.5 var(--mono);overflow:auto}
+pre .c{color:#8FB3FF}pre .k{color:#FFD479}
+.callout{border-left:4px solid var(--blue);background:var(--panel);padding:10px 14px;margin:14px 0;border-radius:0 6px 6px 0}
+.callout.warn{border-left-color:var(--amber)}.callout.red{border-left-color:var(--red)}.callout.ok{border-left-color:var(--green)}
+.flow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:var(--mono);font-size:12.5px;margin:10px 0}
+.flow span{background:var(--panel);border:1px solid var(--ink);padding:5px 9px;border-radius:4px}.flow i{color:var(--ink2);font-style:normal}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:18px}@media(max-width:820px){.two,.tiers{grid-template-columns:1fr}.arrow{display:none}}
+.legend{font-size:12.5px;color:var(--ink2)}
+.small{font-size:13px;color:var(--ink2)}
+</style></head><body><div class="wrap">
+
+<div class="eyebrow">Architecture note · HSS Central Financial Control · Production pathway</div>
+<h1>From an 18-tab workbook to an intranet service — same architecture, only the labels change</h1>
+<p class="lede">The slide's claim holds for this workbook: browser → server → database. The workbook already <em>is</em> that architecture in disguise — registers are tables, pivots are views, formulas are rules, the yellow cells are the write API, and the "Checks" tab is the test suite. This note maps each tab to its production component, lists the file formats each tier is written in, and states what the final deployed output actually is.</p>
+
+<div class="callout red"><b>Read this first — one structural disagreement with the phrase "the same Excel can be a live site".</b> In production the Excel stops being the source of truth. PostgreSQL becomes the source of truth; the workbook becomes a controlled <em>import format</em> (on-ramp) and a regenerated <em>output</em> (off-ramp, <span class="ext">GET /export.xlsx</span>). If two things can both be edited, one of them is a copy — and the control model in tab 00 says explicitly it is "not an accounting ledger" and depends on human assurance. Human assurance is far easier to enforce on a database with roles and an audit log than on a file that anyone can Save-As. The test harness delivered alongside this note keeps the Excel as the source on purpose — that is what makes it a test, not a system.</div>
+
+<h2>1 · The production stack, in this workbook's terms</h2>
+<div class="tiers">
+  <div class="tier br"><div class="t">Browser</div><div class="s">TypeScript · React · Vite</div>
+    <ul><li>One page per management tab (Dashboard, FY position, Variance, Exceptions)</li><li>One form per register (AOR, Commitments, Cost drivers, Licence checks, Actuals)</li><li>Yellow/blue "input cell" styling becomes the design system for editable fields</li><li>FY selector is client state; every number comes from the API, never computed twice</li></ul>
+    <div class="out"><b>WRITTEN IN</b> <span class="ext">.tsx</span> <span class="ext">.ts</span> <span class="ext">.css</span> <span class="ext">vite.config.ts</span> <span class="ext">tsconfig.json</span> <span class="ext">package.json</span><br><b>FINAL OUTPUT</b> <span class="ext">dist/index.html</span> + hashed <span class="ext">assets/*.js</span> <span class="ext">*.css</span> — static files, served by nginx</div></div>
+  <div class="arrow">HTTPS<br>JSON<br>⇄</div>
+  <div class="tier api"><div class="t">Server</div><div class="s">Python · FastAPI · Pydantic</div>
+    <ul><li>Routers mirror the workbook's control chain: funding → aor → commitments → drivers → actuals → forecast</li><li>Rules module = the formulas (qty × rate × months; actual + expected remaining; utilisation thresholds)</li><li>Exceptions & Checks run on every write and nightly</li><li>Importer reads the .xlsx via the import spec; exporter regenerates it</li><li>Auth: SSO / role per "human confirms" column (Finance, BA, Commercial, Ops owner)</li></ul>
+    <div class="out"><b>WRITTEN IN</b> <span class="ext">.py</span> <span class="ext">pyproject.toml</span> <span class="ext">alembic/*.py</span> <span class="ext">tests/*.py</span> <span class="ext">import_spec.json</span><br><b>FINAL OUTPUT</b> a container image (<span class="ext">Dockerfile</span>) running uvicorn, exposing <span class="ext">/api/v1/*</span> and <span class="ext">/openapi.json</span></div></div>
+  <div class="arrow">SQL<br>asyncpg<br>⇄</div>
+  <div class="tier db"><div class="t">Database</div><div class="s">PostgreSQL</div>
+    <ul><li>One table per register; enum/lookup tables from 16_Lookups</li><li>Pivot tabs become SQL views (or materialised views refreshed on write)</li><li>Append-only <span class="ext">actuals</span> with reversal rows (the "Correction" scenario in 17)</li><li>Unique index on (source_id, invoice_ref) — the "Duplicate" scenario</li><li><span class="ext">audit_log</span> table: who confirmed what, when, with which evidence ref</li></ul>
+    <div class="out"><b>WRITTEN IN</b> <span class="ext">.sql</span> (schema, views, constraints) via <span class="ext">alembic</span> migrations, <span class="ext">seed/*.csv</span><br><b>FINAL OUTPUT</b> a running Postgres database on the intranet, nightly <span class="ext">pg_dump</span> backups, plus the regenerated <span class="ext">.xlsx</span> as a controlled report</div></div>
+</div>
+<p class="legend">Cross-cutting files: <span class="ext">docker-compose.yml</span> · <span class="ext">.env.example</span> · <span class="ext">nginx.conf</span> · <span class="ext">.gitlab-ci.yml</span> (GitLab Ultimate is already a cost item in tab 05 — the CI/CD pipeline lives there) · <span class="ext">README.md</span> · <span class="ext">docs/adr/*.md</span></p>
+
+<h2>2 · Tab-by-tab: what each of the 18 sheets becomes</h2>
+<p class="legend"><span class="tag tbl">table</span> Postgres table &nbsp; <span class="tag view">view</span> SQL view &nbsp; <span class="tag rule">rule</span> Python function &nbsp; <span class="tag page">page</span> React route &nbsp; <span class="tag job">job</span> scheduled/triggered task &nbsp; <span class="tag test">test</span> pytest / acceptance</p>
+<table><thead><tr><th class="m">Sheet</th><th>Production component</th><th>Files</th></tr></thead><tbody>
+<tr><td class="m">00_Cover</td><td><span class="tag tbl">table</span> <span class="tag page">page</span> <code>model_meta</code> (version, as-of, status, currency, FY basis) + About page; "How to use" becomes the README</td><td class="m">models/meta.py · README.md</td></tr>
+<tr><td class="m">01_Dashboard</td><td><span class="tag page">page</span> composed from the /position, /pivot and /exceptions endpoints — no logic of its own</td><td class="m">pages/Dashboard.tsx</td></tr>
+<tr><td class="m">02_FY_Position</td><td><span class="tag tbl">table</span> <code>fy_funding</code> (requested, finance allocation — Finance-role only) · <span class="tag view">view</span> <code>v_fy_position</code> derives the rest</td><td class="m">sql/002_fy.sql · routers/fy.py</td></tr>
+<tr><td class="m">03_AOR_Register</td><td><span class="tag tbl">table</span> <code>aor</code> + <code>aor_fy_allocation</code> (1:n) — two tables because the sheet is two tables side by side</td><td class="m">sql/003_aor.sql · pages/Aor.tsx</td></tr>
+<tr><td class="m">04_PO_Commitments</td><td><span class="tag tbl">table</span> <code>commitment</code> + <code>milestone</code> (1:n) · constraint: Σ milestone.planned_amount ≤ ceiling (Check row 6)</td><td class="m">sql/004_commitment.sql</td></tr>
+<tr><td class="m">05_Cost_Drivers</td><td><span class="tag tbl">table</span> <code>cost_driver</code> · <span class="tag rule">rule</span> <code>requirement = qty × rate × months</code>; driver-vs-source diff raises EXC-005-type exception</td><td class="m">rules/drivers.py · tests/test_drivers.py</td></tr>
+<tr><td class="m">06_Licence_Checks</td><td><span class="tag tbl">table</span> <code>licence_observation</code> · <span class="tag job">job</span> generate rows monthly, mark OVERDUE after day 8 · <span class="tag page">page</span> confirm form (qty, evidence ref, confirmed_by from SSO)</td><td class="m">jobs/licence_cycle.py · pages/LicenceChecks.tsx</td></tr>
+<tr><td class="m">07_Actuals</td><td><span class="tag tbl">table</span> <code>actual</code> append-only; <code>recognition_basis</code> is an enum from 16_Lookups; only status=Recognised enters views. The recognition point (EXC-004) is a business decision — the schema holds the column, it cannot decide the rule.</td><td class="m">sql/007_actual.sql · routers/actuals.py</td></tr>
+<tr><td class="m">08_Forecast_Monthly</td><td><span class="tag view">view</span> <code>v_forecast_month</code> — confirmed qty rolls forward until replaced; outturn = actual + expected remaining · <span class="tag rule">rule</span> <span class="tag test">test</span> "Licence drift" scenario</td><td class="m">rules/forecast.py · sql/v_forecast.sql</td></tr>
+<tr><td class="m">09_Variance</td><td><span class="tag view">view</span> <code>v_variance</code> (source plan vs requirement vs forecast) · status DRIVER MISMATCH when Δ≠0</td><td class="m">sql/v_variance.sql</td></tr>
+<tr><td class="m">10_Exceptions</td><td><span class="tag tbl">table</span> <code>exception</code> written by <span class="tag job">job</span> <code>run_controls()</code> on every write + nightly; owner/where-to-fix become deep links into pages</td><td class="m">rules/controls.py · pages/Exceptions.tsx</td></tr>
+<tr><td class="m">11/12/13_Pivot_*</td><td><span class="tag view">view</span> <code>v_pivot_cost_stream</code>, <code>v_pivot_aor</code>, <code>v_pivot_month</code>, parameterised by FY — the API's <code>/fy/{fy}/pivot/*</code></td><td class="m">sql/v_pivots.sql · routers/pivots.py</td></tr>
+<tr><td class="m">14_Sources</td><td><span class="tag tbl">table</span> <code>source</code> — every input row carries <code>source_id</code> FK; the provenance tab becomes referential integrity</td><td class="m">sql/014_source.sql</td></tr>
+<tr><td class="m">15_Checks</td><td><span class="tag test">test</span> pytest suite + a <code>/health/model</code> endpoint that returns REVIEW/OK; CI fails the build if any check regresses</td><td class="m">tests/test_checks.py · .gitlab-ci.yml</td></tr>
+<tr><td class="m">16_Lookups</td><td><span class="tag tbl">table</span> enum tables + <code>control_parameter</code> (licence day 8, warn 0.8, crit 1.0) — editable by BA role, not hard-coded</td><td class="m">sql/016_lookups.sql</td></tr>
+<tr><td class="m">17_Demo_Scenarios</td><td><span class="tag test">test</span> acceptance tests, one per row; "Cross-FY" stays <em>Blocked</em> until Finance supplies the attribution rule — the test is written and marked xfail</td><td class="m">tests/acceptance/*.py</td></tr>
+</tbody></table>
+
+<h2>3 · How data moves</h2>
+<div class="flow"><span>xlsx (today)</span><i>→</i><span>importers/xlsx_importer.py + import_spec.json</span><i>→</i><span>Pydantic validation (types, enums, FKs)</span><i>→</i><span>PostgreSQL tables</span><i>→</i><span>SQL views = pivots</span><i>→</i><span>FastAPI /api/v1</span><i>→</i><span>React pages</span><i>→</i><span>GSIB browser on intranet</span></div>
+<div class="flow"><span>human confirms (yellow cell)</span><i>→</i><span>POST/PATCH with SSO identity + evidence ref</span><i>→</i><span>audit_log row + register row</span><i>→</i><span>run_controls() → exceptions</span><i>→</i><span>views refresh</span><i>→</i><span>GET /export.xlsx regenerates the 18 tabs</span></div>
+<p class="small">The importer is the only place the workbook layout is known. <span class="ext">import_spec.json</span> (sheet · header row · first column · optional last column, per table) is checked in; when a tab moves, the spec changes, nothing else does. The test harness uses the identical spec in the browser.</p>
+
+<h2>4 · Repository shape</h2>
+<pre><span class="c"># hss-financial-control/</span>
+├── frontend/                       <span class="c"># Browser tier — TypeScript</span>
+│   ├── src/pages/{Dashboard,FyPosition,Variance,Exceptions,Aor,Commitments,CostDrivers,LicenceChecks,Actuals}.tsx
+│   ├── src/components/{InputCell,StatusBadge,DataTable,FySelector}.tsx
+│   ├── src/api/client.ts           <span class="c"># generated from /openapi.json</span>
+│   ├── vite.config.ts · tsconfig.json · package.json
+│   └── dist/                       <span class="c"># build output → nginx</span>
+├── backend/                        <span class="c"># Server tier — Python</span>
+│   ├── app/main.py
+│   ├── app/routers/{fy,aor,commitments,drivers,licence,actuals,forecast,pivots,exceptions,export}.py
+│   ├── app/models/*.py             <span class="c"># SQLAlchemy</span>
+│   ├── app/schemas/*.py            <span class="c"># Pydantic — the API contract</span>
+│   ├── app/rules/{drivers,forecast,controls,utilisation}.py   <span class="c"># the formulas</span>
+│   ├── app/importers/xlsx_importer.py · app/exporters/xlsx_exporter.py · import_spec.json
+│   ├── app/jobs/{licence_cycle,run_controls}.py
+│   ├── alembic/versions/*.py       <span class="c"># migrations (.sql embedded)</span>
+│   ├── tests/{test_rules,test_checks}.py · tests/acceptance/*.py
+│   ├── pyproject.toml · Dockerfile
+├── db/                             <span class="c"># Database tier</span>
+│   ├── sql/{002_fy,003_aor,004_commitment,005_driver,006_licence,007_actual,014_source,016_lookups}.sql
+│   ├── sql/views/{v_fy_position,v_forecast_month,v_variance,v_pivots}.sql
+│   └── seed/*.csv
+├── deploy/  nginx.conf · docker-compose.yml · .env.example
+├── .gitlab-ci.yml                  <span class="c"># lint → pytest → build dist → build image → deploy to intranet host</span>
+└── docs/adr/  0001-postgres-is-source-of-truth.md · 0002-append-only-actuals.md</pre>
+
+<h2>5 · Deployment on the intranet</h2>
+<div class="two">
+<div><h3>Runtime</h3><p>One intranet host (or a small VM pair) running <span class="ext">docker-compose</span>: nginx (serves <span class="ext">dist/</span>, proxies <span class="ext">/api</span>), the FastAPI container, and PostgreSQL. TLS from the internal CA; hostname on the internal DNS; users arrive from GSIB devices with SSO. Nothing here needs internet egress — Google Fonts in the harness must be replaced with self-hosted fonts in production.</p>
+<h3>Pipeline (.gitlab-ci.yml)</h3><p>lint → <span class="ext">pytest</span> (rules + checks + acceptance) → <span class="ext">vite build</span> → docker build → deploy. A failing 15_Checks-equivalent fails the pipeline, so REVIEW status cannot silently reach production.</p></div>
+<div><h3>Roles map to the workbook's "who confirms"</h3>
+<table><thead><tr><th>Role</th><th>May write</th></tr></thead><tbody>
+<tr><td>Finance</td><td>fy_funding.finance_allocation, aor.official_ref, recognition_basis approval</td></tr>
+<tr><td>BA</td><td>aor_fy_allocation, control_parameter, exception close</td></tr>
+<tr><td>Commercial</td><td>commitment.po_ref, milestones, AOR mapping</td></tr>
+<tr><td>Ops owner</td><td>licence_observation.confirmed_qty + evidence</td></tr>
+<tr><td>Everyone else</td><td>read only — the pivots</td></tr></tbody></table></div></div>
+
+<h2>6 · The prototype pathway (the slide's left box) — and where the test harness sits</h2>
+<p>Stage 0 is the delivered <b>test harness</b>: a single <span class="ext">.html</span> that embeds the workbook as JSON, re-implements the formulas in JavaScript, and reconciles them against the workbook's own pivot tabs. It proved the rules tie (FY26 forecast 130,200; FY27/28 195,300; monthly 16,275; Jira &amp; Confluence driver mismatch +120; 5 critical / 2 warning / 5 overdue / 3 mismatches). Stage 1 is the slide's "Today's stack" — Express.js + SQLite, same JSON shapes, run locally, so the API contract is exercised before Python is written. Stage 2 is the production stack above. The process is identical across all three; only the labels change.</p>
+
+<h2>7 · What architecture cannot fix</h2>
+<div class="callout warn">Four of the five open critical exceptions are business definitions, not engineering gaps: Finance allocation missing (EXC-001), official AOR references (EXC-002), Azure PO→AOR mapping (EXC-003), and the Actual Spend recognition point (EXC-004). The schema can hold a column for each; it cannot decide them. Ship the system with those columns nullable and the checks failing loudly, exactly as the workbook does today — that honesty is the control.</div>
+<p class="small">Also unresolved by design: the Cross-FY attribution rule (17_Demo, Blocked) and the AOR→cost-stream mapping (why the cost-stream pivot shows AOR allocation 0 across the board — the workbook has no such mapping, and neither will the database until Finance supplies one).</p>
+
+</div></body></html>
